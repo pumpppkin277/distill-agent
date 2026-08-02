@@ -1,0 +1,25 @@
+{
+  "name": "distill-agent",
+  "version": "0.1.0",
+  "description": "A Feishu-native multi-agent runtime with governed context and verified execution.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "tsx src/example-bot.ts",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "pnpm run build && node --test tests/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.68.0",
+    "dotenv": "^17.4.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.8.0"
+  }
+}
