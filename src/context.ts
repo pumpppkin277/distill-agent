@@ -58,6 +58,88 @@ export class MemoryContextStore implements ContextStore {
   }
 }
 
+export class SqliteContextStore implements ContextStore {
+  private readonly db: Database.Database;
+
+  constructor(path: string) {
+    mkdirSync(dirname(path), { recursive: true });
+    this.db = new Database(path);
+    this.db.pragma("journal_mode = WAL");
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS context_records (
+        id TEXT PRIMARY KEY, kind TEXT NOT NULL, tenant_id TEXT NOT NULL,
+        status TEXT NOT NULL, summary TEXT NOT NULL, record_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS context_revisions (
+        seq INTEGER PRIMARY KEY AUTOINCREMENT, context_id TEXT NOT NULL,
+        record_json TEXT NOT NULL, created_at TEXT NOT NULL
+      );
+    `);
+  }
+
+  async save(record: ContextRecord): Promise<void> {
+    const json = JSON.stringify(record);
+    const transaction = this.db.transaction(() => {
+      this.db.prepare(
+        "INSERT INTO context_revisions(context_id,record_json,created_at) VALUES(?,?,?)",
+      ).run(record.id, json, record.updatedAt);
+      this.db.prepare(
+        `INSERT INTO context_records(id,kind,tenant_id,status,summary,record_json,updated_at)
+         VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+         kind=excluded.kind,tenant_id=excluded.tenant_id,status=excluded.status,
+         summary=excluded.summary,record_json=excluded.record_json,updated_at=excluded.updated_at`,
+      ).run(record.id, record.kind, record.scope.tenantId, record.status, record.summary, json, record.updatedAt);
+    });
+    transaction();
+  }
+
+  async search(query: string, scope: ContextScope): Promise<ContextRecord[]> {
+    const rows = this.db.prepare(
+      "SELECT record_json FROM context_records WHERE tenant_id=? AND status='confirmed'",
+    ).all(scope.tenantId) as Array<{ record_json: string }>;
+    const tokens = query.toLowerCase().split(/\s+/).filter(Boolean);
+    return rows
+      .map((row) => JSON.parse(row.record_json) as ContextRecord)
+      .filter((record) => canUseContext(record, scope).usable)
+      .map((record) => ({
+        record,
+        score: tokens.filter((token) => record.summary.toLowerCase().includes(token)).length,
+      }))
+      .filter(({ score }) => tokens.length === 0 || score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 8)
+      .map(({ record }) => record);
+  }
+
+  async review(id: string, decision: "confirmed" | "rejected", now = new Date()): Promise<ContextRecord> {
+    const row = this.db.prepare("SELECT record_json FROM context_records WHERE id=?").get(id) as
+      | { record_json: string }
+      | undefined;
+    if (!row) throw new Error(`context_not_found:${id}`);
+    const current = JSON.parse(row.record_json) as ContextRecord;
+    if (!['generated_draft', 'needs_review', 'stale'].includes(current.status)) {
+      throw new Error(`invalid_context_review_transition:${current.status}`);
+    }
+    const next = { ...current, status: decision, updatedAt: now.toISOString() } satisfies ContextRecord;
+    await this.save(next);
+    return next;
+  }
+
+  health(): { total: number; pendingReview: number; latestUpdatedAt?: string } {
+    const row = this.db.prepare(
+      `SELECT COUNT(*) AS total,
+       SUM(CASE WHEN status='needs_review' THEN 1 ELSE 0 END) AS pending,
+       MAX(updated_at) AS latest FROM context_records`,
+    ).get() as { total: number; pending: number | null; latest: string | null };
+    return {
+      total: row.total,
+      pendingReview: row.pending ?? 0,
+      latestUpdatedAt: row.latest ?? undefined,
+    };
+  }
+}
+
 export function canUseContext(
   record: ContextRecord,
   requestedScope: ContextScope,
@@ -82,3 +164,6 @@ function scopeContains(record: ContextScope, requested: ContextScope): boolean {
   }
   return true;
 }
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
+import Database from "better-sqlite3";
