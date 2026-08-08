@@ -4,6 +4,8 @@ export type FeishuMessage = {
   tenantId: string;
   chatId: string;
   messageId?: string;
+  parentMessageId?: string;
+  rootMessageId?: string;
   senderId?: string;
   text: string;
 };
@@ -17,6 +19,8 @@ export function parseFeishuMessage(data: any): FeishuMessage {
     tenantId: String(header.tenant_key ?? "default"),
     chatId: String(message.chat_id ?? ""),
     messageId: message.message_id ? String(message.message_id) : undefined,
+    parentMessageId: message.parent_id ? String(message.parent_id) : undefined,
+    rootMessageId: message.root_id ? String(message.root_id) : undefined,
     senderId: sender?.sender_id?.open_id ? String(sender.sender_id.open_id) : undefined,
     text: messageText(message.content),
   };
@@ -27,7 +31,7 @@ export class FeishuBot {
 
   constructor(
     private readonly config: { appId: string; appSecret: string },
-    private readonly onMessage: (message: FeishuMessage) => Promise<string>,
+    private readonly onMessage: (message: FeishuMessage) => Promise<string | undefined>,
   ) {
     this.client = new lark.Client({
       appId: config.appId,
@@ -42,7 +46,7 @@ export class FeishuBot {
         const message = parseFeishuMessage(data);
         if (!message.chatId || !message.text) return;
         const reply = await this.onMessage(message);
-        await this.send(message.chatId, reply);
+        if (reply) await this.send(message.chatId, reply);
       },
     });
     new lark.WSClient({

@@ -2,291 +2,210 @@
 
 [简体中文](README.md) | [English](README.en.md)
 
-一个飞书原生的多 Agent Runtime：把可治理的团队 Context 转化为可核验的工作结果。
+一个飞书原生、可恢复、可验证的多 Agent Harness。
 
-> 让开发者用少量代码，在飞书里部署一个可审批、可审核、能持续理解团队 Context 的 Agent 团队。
+> 把 Codex 等 Agent 的能力组织成团队可共享、可暂停恢复、可核验和可治理的工作系统。
 
-Distill Agent 是一个面向飞书/Lark 开发者的开源多 Agent 框架。它把 Planner、Worker 和独立 Reviewer 连接到飞书消息入口，并提供 Context 范围隔离、生命周期管理和人工确认门。
+Distill Agent 不是另一个聊天机器人。它解决的是任务开始之后的工程问题：执行到了哪里、能否继续、是否会重复写入、外部操作是否真的成功，以及 Reviewer 能否独立核验结果。
 
-项目目前处于 Alpha 阶段，适合学习、实验和二次开发。真实业务写入前，请根据自己的工作流补齐持久化、权限、幂等和目标系统读回。
-
-## 为什么做 Distill Agent
-
-普通机器人通常只完成两步：收到消息，然后调用一次大模型。
-
-Distill Agent 面向完整的工作闭环：
+## 五层架构
 
 ```text
-飞书请求
-  → 检索已确认的 Context
-  → Planner 制定计划
-  → 必要时等待人工确认
-  → Worker 执行任务
-  → Reviewer 独立审核
-  → 返回带证据的结果
-  → 生成新的 Context 待确认候选
+交互层：飞书消息、回复关系、确认与结果回写
+   ↓
+认知层：主 Agent 两阶段 Context 规划与 Grounded Plan
+   ↓
+能力层：Ability Registry、Skill、执行契约与验证契约
+   ↓
+执行层：LangGraph、Worker、Verifier、Reviewer、SQLite 状态
+   ↓
+治理层：健康探针、Context 积压与 Reconcile 告警
 ```
 
-它不只关心“Agent 回答了什么”，还关心：
-
-- Agent 为什么这样判断；
-- 使用了哪些工作背景；
-- 这些背景是否已确认、是否过期；
-- 高风险操作是否经过用户授权；
-- Worker 是否提供了可核验的证据；
-- Reviewer 是否独立确认了结果。
-
-## 核心能力
-
-### 1. 可治理的 Context
-
-Context 不是无限增长的聊天记录，也不是执行授权。
-
-每条 Context 都可以携带：
-
-- 来源类型和来源引用；
-- 可选的来源 revision；
-- tenant、chat、user、project 范围；
-- 明确的生命周期状态；
-- 可选的过期时间；
-- 人工评审边界。
-
-当前支持五种状态：
+一项任务的默认执行图：
 
 ```text
-generated_draft → needs_review → confirmed → stale
-                         └──────→ rejected
+Preflight → Execute → Verify → Review → Finalize
+                 └── uncertain → Reconcile → STOP
 ```
 
-只有同时满足以下条件的 Context 才能进入任务检索结果：
+模型或 Agent 负责理解和执行，确定性代码负责能力准入、确认、幂等、状态转换和结果验收。
 
-1. 状态为 `confirmed`；
-2. 没有过期；
-3. 与当前 tenant/chat/user/project scope 兼容。
+## v0.2 已实现
 
-任务执行结果不会自动污染长期记忆，而是先生成 `needs_review` 候选。
-
-### 2. 真实的多 Agent 边界
-
-- **Planner**：理解请求，结合 Context 生成目标和步骤；
-- **Worker**：执行任务并返回结果证据；
-- **Reviewer**：独立检查结果和证据；
-- **Runtime**：控制 Context 检索、人工确认和状态流转。
-
-Worker 不能自己审核自己。只有执行成功且 Reviewer 通过，任务才会形成完成结果。
-
-### 3. 人工确认门
-
-任务风险分为：
-
-- `low`：可以直接执行；
-- `medium`：需要人工确认；
-- `high`：需要人工确认。
-
-当前 Alpha 版提供运行时确认暂停能力。后续将增加飞书交互卡片、可恢复确认和确认输入指纹。
-
-### 4. 飞书原生入口
-
-当前示例支持：
-
-- 飞书/Lark 自建应用；
-- 长连接接收消息；
-- 单聊和群聊文本消息；
-- 自动移除消息中的机器人 `@` 标签；
-- 将 Agent 最终结果发送回原会话。
+- **LangGraph Durable Harness**：显式实现 Preflight、Execute、Verify、Review、Finalize 和 Reconcile 节点，并使用 SQLite Checkpoint 保存图状态。
+- **持久化任务状态**：SQLite 保存 Task Snapshot、Confirmation、Attempt、Lease、Artifact 和消息幂等记录。
+- **高风险确认门**：中高风险任务暂停执行；Confirmation 与任务输入指纹绑定并具有有效期。
+- **防重复执行**：每次外部执行生成幂等键，Worker 获取写 Lease 后才能运行；已存在 Attempt 时进入 Reconcile，不盲目重放。
+- **确定性验证**：Ability 声明必填事实、外部读回和回写要求；Reviewer 不能覆盖 Verifier 的拒绝结果。
+- **独立 Reviewer 协议**：Worker 和 Reviewer 使用不同接口，通过持久化结果与证据交接。
+- **SQLite Context Store**：Context 保留来源、Revision、Scope、生命周期和历史版本，只有 confirmed、未过期且范围匹配的记录可以召回。
+- **Context Ingestor**：提供可插拔 Connector，并内置 Markdown 目录 Connector；每次采集先保存原始 Run，再生成 needs_review 候选。
+- **两阶段认知接口**：先生成最多 4 个 Context Query，再基于召回证据生成 Grounded Plan。
+- **飞书原生入口**：支持长连接、单聊/群聊、@ 清理、parent/root 回复关系和 message_id 幂等。
+- **P0 运维观测**：`/healthz` 暴露任务数、Context 数、待确认 Context 和 uncertain Attempt；出现待对账执行时 fail closed。
 
 ## 快速开始
 
-### 环境要求
-
-- Node.js 20 或更高版本；
-- pnpm；
-- 一个飞书或 Lark 自建应用；
-- 已开启机器人能力；
-- 已通过长连接订阅 `im.message.receive_v1` 事件。
-
-### 1. 下载项目
+环境要求：Node.js 20+、pnpm，以及已开启机器人和长连接事件订阅的飞书/Lark 自建应用。
 
 ```bash
 git clone https://github.com/pumpppkin277/distill-agent.git
 cd distill-agent
 pnpm install
-```
-
-### 2. 配置飞书应用
-
-```bash
 cp .env.example .env
+pnpm dev
 ```
 
-在 `.env` 中填写自己的应用凭证：
+在 `.env` 中填写自己的凭证：
 
 ```dotenv
 FEISHU_APP_ID=cli_your_app_id
 FEISHU_APP_SECRET=your_app_secret
+HEALTH_PORT=8787
 ```
 
-不要把 `.env`、App Secret 或访问令牌提交到 GitHub。
+示例能力是一个不会写外部系统的 Medium Risk Skill。第一次发送消息后，Bot 会返回 Task ID；确认执行：
 
-### 3. 启动
+```text
+confirm <task-id>
+```
+
+任务将经过完整的 LangGraph Harness，并把状态写入：
+
+```text
+data/harness.sqlite
+data/context.sqlite
+data/checkpoints.sqlite
+```
+
+健康检查：
 
 ```bash
-pnpm dev
+curl http://127.0.0.1:8787/healthz
 ```
 
-启动后，在飞书中向机器人发送消息。示例 Worker 不会执行真实外部操作，只会生成演示结果和本地任务证据。
-
-## 定义自己的 Agent 团队
+## 注册业务能力
 
 ```ts
-import type { AgentTeam } from "./src/agents.js";
-
-const team: AgentTeam = {
-  planner: {
-    async plan(request, context) {
-      return {
-        goal: request.text,
-        steps: ["调研", "生成草稿", "审核"],
-        contextIds: context.map((item) => item.id),
-      };
-    },
+const abilities = new AbilityRegistry().register({
+  name: "create_document",
+  description: "Create and verify a Feishu document",
+  risk: "medium",
+  triggers: [/创建.*文档/],
+  executionContract: "Create one document in the approved folder.",
+  verificationContract: {
+    requiredFacts: ["documentId", "readbackTitle"],
+    requireExternalReadback: true,
   },
-
-  worker: {
-    async execute(request, plan) {
-      return {
-        ok: true,
-        summary: "草稿已经创建",
-        evidence: ["feishu-doc:document-token"],
-      };
-    },
-  },
-
-  reviewer: {
-    async review(request, result) {
-      return {
-        approved: result.ok && result.evidence.length > 0,
-        summary: "已经核验结果证据",
-      };
-    },
-  },
-};
-```
-
-你可以把 Planner、Worker 和 Reviewer 分别连接到不同的模型、工具或 Agent Runtime。
-
-## Context 示例
-
-```ts
-await contextStore.save({
-  id: "workflow-publish-review",
-  kind: "workflow",
-  scope: {
-    tenantId: "tenant-a",
-    projectId: "project-a",
-  },
-  status: "confirmed",
-  summary: "所有对外发布内容都需要独立审核",
-  value: {
-    rule: "review before publish",
-  },
-  sources: [
-    {
-      type: "document",
-      ref: "document-token",
-      revision: "3",
-      observedAt: new Date().toISOString(),
-    },
+  reviewerChecklist: [
+    "The title matches the request",
+    "The returned document is accessible",
   ],
-  createdAt: new Date().toISOString(),
-  updatedAt: new Date().toISOString(),
+  async execute(task) {
+    // 调用自己的 Skill 或工具，并重新读取目标系统。
+    return {
+      ok: true,
+      summary: "Document created",
+      evidence: ["https://example.feishu.cn/docx/xxx"],
+      externalState: "verified",
+      externalReferences: ["document:xxx"],
+      writebackState: "not_applicable",
+      facts: { documentId: "xxx", readbackTitle: "Project brief" },
+    };
+  },
+  async review(task) {
+    // 生产环境中应使用独立线程或只读 Reviewer Runtime。
+    return {
+      ok: Boolean(task.execution?.externalReferences?.length),
+      summary: "Reviewer confirmed the read-back evidence",
+      evidence: task.execution?.evidence ?? [],
+    };
+  },
 });
 ```
 
-如果任务来自另一个 tenant 或 project，这条 Context 不会被召回。
+## Context 采集与确认
+
+```ts
+const context = new SqliteContextStore("data/context.sqlite");
+const ingestor = new ContextIngestor(context);
+
+const run = await ingestor.ingest(
+  new MarkdownDirectoryConnector("./knowledge"),
+  { tenantId: "tenant-a", projectId: "project-a" },
+);
+
+// 自动采集只生成候选，必须审核后才能影响任务。
+await context.review(run.candidateIds[0], "confirmed");
+```
+
+Context Connector 只负责读取来源。Ingestor 负责保存原始 Run、生成稳定 ID 和 needs_review 候选；Context Store 负责版本、Scope 与审核状态；Grounded Planner 负责在任务开始时召回证据。
+
+## 可靠执行保证
+
+| 问题 | Harness 行为 |
+|---|---|
+| 中高风险任务未确认 | Preflight 拒绝执行 |
+| 用户确认后修改任务输入 | 输入指纹变化，原确认失效 |
+| 相同任务重复触发 | 命中相同幂等 Attempt，进入 Reconcile |
+| 多个 Worker 同时执行 | 只有持有 Lease 的 Worker 可以运行 |
+| Worker 抛错或外部状态未知 | 状态持久化为 reconciling，禁止自动重试 |
+| 缺少必填事实或读回证据 | Verifier 拒绝，Reviewer 无权升级为成功 |
+| 业务成功但回写未完成 | 状态独立收口为 writeback_pending |
+| 服务重启 | 使用 LangGraph Checkpoint 查看并恢复流程位置 |
 
 ## 项目结构
 
 ```text
 src/
-  agents.ts        Agent 团队协议
-  context.ts       Context 类型、scope 和生命周期门
-  runtime.ts       Planner/Worker/Reviewer 执行流程
-  feishu.ts        飞书长连接消息适配器
-  example-bot.ts   可运行示例
-  index.ts         公共导出入口
-
-tests/
-  context.test.mjs Context 隔离和确认状态测试
-  runtime.test.mjs 审批和 Reviewer 流程测试
+  abilities.ts      Ability Registry 与确定性验证契约
+  cognitive.ts      两阶段 Context 查询与 Grounded Plan
+  context.ts        Memory/SQLite Context Store 与审核状态
+  ingest.ts         Context Connector 与原始 Run
+  harness.ts        LangGraph Durable Execution Harness
+  store.ts          Task、Confirmation、Attempt、Artifact、Lease
+  orchestrator.ts   认知、确认与 Harness 编排
+  feishu.ts         飞书长连接与消息标准化
+  ops.ts            P0 健康探针
+  protocol.ts       稳定任务与证据协议
+  example-bot.ts    可运行的安全示例
 ```
 
-## 运行测试
+## 测试
 
 ```bash
 pnpm typecheck
 pnpm test
 ```
 
-测试重点覆盖：
+测试覆盖：
 
-- Context 不跨 tenant/project 泄漏；
-- 未确认的 Context 不能进入任务检索；
-- 中高风险任务在执行前暂停；
-- 通过 Reviewer 的结果只生成待确认 Context 候选。
+- Confirmation 持久化与输入指纹绑定；
+- Medium Risk 任务确认前暂停；
+- 同一任务只执行一次；
+- 状态不明进入 Reconcile；
+- Verifier 拒绝不能被 Reviewer 覆盖；
+- SQLite Context Scope 和审核状态；
+- Context 原始 Run 与候选生成；
+- uncertain Attempt 触发运维健康失败。
 
-## 当前状态与 Roadmap
+## 下一步
 
-当前已经提供：
-
-- 飞书/Lark 长连接消息适配；
-- Planner → Worker → Reviewer Runtime；
-- tenant/chat/user/project Context scope；
-- Context 生命周期和过期判断；
-- 中高风险人工确认暂停；
-- 证据检查和任务后 Context 候选；
-- 自动测试和 GitHub Actions。
-
-计划中的能力：
-
-- SQLite Context 与任务持久化；
-- 飞书交互式审批卡片；
-- 可恢复的人工确认；
-- 文档、Sheet、Slides、多维表格、日历和任务工具包；
-- Durable checkpoint、幂等键和外部状态对账；
-- 可插拔模型与 Agent Adapter；
-- Context 增量同步、评审界面和召回质量评测。
+- 飞书交互式审批卡片和可恢复 Interrupt；
+- 飞书 Doc、Sheet、Slides、Base Connector；
+- 可插拔 LLM/Codex/Claude Worker 与 Reviewer Adapter；
+- 能力专属 Reconcile 只读对账；
+- Context 相关性、串线、负例和新鲜度评测包；
+- P1 影子巡检、问题账本和版本化 Skill 指纹；
+- Docker、CLI Scaffold 和更多端到端示例。
 
 ## 安全原则
 
-> Context 是信息，不是权限。
+Context 是信息，不是权限。生产写操作至少应具备人工确认、输入指纹、幂等键、外部状态读回、独立 Reviewer 和可追溯证据。
 
-接入真实业务写操作前，建议至少实现：
-
-1. 明确的用户确认；
-2. 确认输入指纹；
-3. 外部写入幂等键；
-4. 目标系统状态读回；
-5. 独立 Reviewer；
-6. 可追溯的执行证据。
-
-请勿提交：
-
-- App Secret 和访问令牌；
-- 真实 tenant、user、chat 标识；
-- 公司内部文档链接；
-- 原始飞书消息；
-- 生产环境 Context Store；
-- 业务后台凭证和 Cookie。
-
-## 参与贡献
-
-欢迎提交 Issue 和 Pull Request。修改 Context 行为时，请同时添加 scope、生命周期、过期和审批边界测试。
-
-详见 [CONTRIBUTING.md](CONTRIBUTING.md) 和 [SECURITY.md](SECURITY.md)。
+请勿提交真实 App Secret、访问令牌、租户/用户标识、内部文档链接、原始公司消息或生产 Context Store。
 
 ## License
 
-[MIT](LICENSE)
-
-Distill Agent 是社区开源项目，不是飞书或 Lark 官方产品。
+[MIT](LICENSE)。社区开源项目，不是飞书或 Lark 官方产品。

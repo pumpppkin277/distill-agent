@@ -1,6 +1,6 @@
 {
   "name": "distill-agent",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A Feishu-native multi-agent runtime with governed context and verified execution.",
   "type": "module",
   "private": true,
@@ -14,10 +14,14 @@
     "node": ">=20"
   },
   "dependencies": {
+    "@langchain/langgraph": "^1.4.8",
+    "@langchain/langgraph-checkpoint-sqlite": "^1.0.3",
     "@larksuiteoapi/node-sdk": "^1.68.0",
+    "better-sqlite3": "^12.11.0",
     "dotenv": "^17.4.2"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.0.0",
     "tsx": "^4.20.0",
     "typescript": "^5.8.0"
